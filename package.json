@@ -12,7 +12,14 @@
 		"check": "biome check --write . && tsgo --noEmit",
 		"prepare": "husky"
 	},
-	"keywords": ["github", "pull-request", "triage", "embeddings", "visualization", "umap"],
+	"keywords": [
+		"github",
+		"pull-request",
+		"triage",
+		"embeddings",
+		"visualization",
+		"umap"
+	],
 	"author": "Mario Zechner",
 	"license": "MIT",
 	"repository": {
@@ -20,6 +27,7 @@
 		"url": "https://github.com/badlogic/doppelgangers.git"
 	},
 	"dependencies": {
+		"ml-pca": "^4.1.1",
 		"openai": "^4.104.0",
 		"umap-js": "^1.4.0"
 	},

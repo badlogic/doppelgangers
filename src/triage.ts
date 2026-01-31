@@ -5,7 +5,7 @@ import fs from "fs";
 import path from "path";
 import readline from "readline";
 import { type BuildOptions, build } from "./build.js";
-import { type EmbedOptions, embed } from "./embed.js";
+import { type EmbedOptions, embed, type Item } from "./embed.js";
 
 type ItemState = "open" | "closed" | "all";
 type ItemType = "pr" | "issue" | "all";
@@ -23,7 +23,11 @@ interface TriageOptions {
 	bodyChars: number;
 	neighbors: number;
 	minDist: number;
+	spread: number;
+	force: boolean;
 	search: boolean;
+	localModel?: string;
+	pcaDims?: number;
 }
 
 function parseRepo(repo: string): { owner: string; name: string } | null {
@@ -55,17 +59,13 @@ async function fetchItems(
 	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
 	const repoLabel = `${owner}/${name}`;
-	const items: object[] = [];
+	const items: Item[] = [];
 	let prCount = 0;
 	let issueCount = 0;
 
-	const fetchEndpoint = async (endpoint: string, itemType: "pr" | "issue") => {
-		const jqFilter =
-			itemType === "issue"
-				? '.[] | select(.pull_request == null) | {url: .html_url, number: .number, title: .title, body: .body, state: .state, type: "issue"}'
-				: '.[] | {url: .html_url, number: .number, title: .title, body: .body, state: .state, type: "pr"}';
-
-		const gh = spawn("gh", ["api", "--paginate", endpoint, "--jq", jqFilter], {
+	// Helper to stream JSON objects from gh command
+	const streamGhJson = async (args: string[], onData: (item: any) => void) => {
+		const gh = spawn("gh", args, {
 			stdio: ["ignore", "pipe", "inherit"],
 		});
 
@@ -80,13 +80,7 @@ async function fetchItems(
 				if (!trimmed) continue;
 				try {
 					const item = JSON.parse(trimmed);
-					items.push(item);
-					if (itemType === "pr") prCount++;
-					else issueCount++;
-					const total = prCount + issueCount;
-					if (total % 200 === 0) {
-						console.log(`[${repoLabel}] Fetched ${prCount} PRs, ${issueCount} issues`);
-					}
+					onData(item);
 				} catch {
 					// skip invalid JSON
 				}
@@ -96,7 +90,7 @@ async function fetchItems(
 		const exitPromise = new Promise<void>((resolve, reject) => {
 			gh.on("close", (code) => {
 				if (code === 0) resolve();
-				else reject(new Error(`gh api ${endpoint} exited with code ${code}`));
+				else reject(new Error(`gh exited with code ${code}`));
 			});
 			gh.on("error", reject);
 		});
@@ -104,9 +98,87 @@ async function fetchItems(
 		await Promise.all([readPromise, exitPromise]);
 	};
 
+	// Helper for GraphQL pagination of PRs
+	const fetchPrsGraphql = async () => {
+		const graphqlStates =
+			state === "open" ? "[OPEN]" : state === "closed" ? "[CLOSED, MERGED]" : "[OPEN, CLOSED, MERGED]";
+
+		const graphqlQuery = `
+			query($owner: String!, $name: String!, $endCursor: String) {
+				repository(owner: $owner, name: $name) {
+					pullRequests(first: 100, after: $endCursor, states: ${graphqlStates}) {
+						pageInfo {
+							hasNextPage
+							endCursor
+						}
+						nodes {
+							number
+							title
+							body
+							url
+							state
+							files(first: 20) {
+								nodes {
+									path
+								}
+							}
+						}
+					}
+				}
+			}
+		`;
+
+		// .data.repository.pullRequests.nodes[] | {number, title, body, url, state: .state | ascii_downcase, type: "pr", files: [.files.nodes[].path]}
+		const jqFilter =
+			'.data.repository.pullRequests.nodes[] | {number, title, body, url, state: (.state | ascii_downcase), type: "pr", files: [.files.nodes[].path]}';
+
+		const args = [
+			"api",
+			"graphql",
+			"--paginate",
+			"-f",
+			`query=${graphqlQuery}`,
+			"-F",
+			`owner=${owner}`,
+			"-F",
+			`name=${name}`,
+			"--jq",
+			jqFilter,
+		];
+
+		await streamGhJson(args, (item) => {
+			if (item.state === "merged") item.state = "closed";
+			items.push(item);
+			prCount++;
+			const total = prCount + issueCount;
+			if (total % 100 === 0) {
+				console.log(`[${repoLabel}] Fetched ${prCount} PRs (with files), ${issueCount} issues`);
+			}
+		});
+	};
+
+	// Helper for REST fetching of issues
+	const fetchEndpoint = async (endpoint: string, itemType: "pr" | "issue") => {
+		const jqFilter =
+			itemType === "issue"
+				? '.[] | select(.pull_request == null) | {url: .html_url, number: .number, title: .title, body: .body, state: .state, type: "issue"}'
+				: '.[] | {url: .html_url, number: .number, title: .title, body: .body, state: .state, type: "pr"}';
+
+		const args = ["api", "--paginate", endpoint, "--jq", jqFilter];
+
+		await streamGhJson(args, (item) => {
+			items.push(item);
+			if (itemType === "pr") prCount++;
+			else issueCount++;
+			const total = prCount + issueCount;
+			if (total % 200 === 0) {
+				console.log(`[${repoLabel}] Fetched ${prCount} PRs, ${issueCount} issues`);
+			}
+		});
+	};
+
 	if (type === "pr" || type === "all") {
-		const prEndpoint = `/repos/${owner}/${name}/pulls?state=${state}&per_page=100`;
-		await fetchEndpoint(prEndpoint, "pr");
+		await fetchPrsGraphql();
 	}
 
 	if (type === "issue" || type === "all") {
@@ -134,7 +206,10 @@ async function main() {
 		bodyChars: 2000,
 		neighbors: 15,
 		minDist: 0.1,
+		spread: 1.0,
+		force: false,
 		search: false,
+		pcaDims: undefined,
 	};
 
 	for (let i = 0; i < args.length; i += 1) {
@@ -170,11 +245,23 @@ async function main() {
 		} else if (arg === "--body-chars") {
 			options.bodyChars = Number(args[++i]);
 		} else if (arg === "--neighbors") {
-			options.neighbors = Number(args[++i]);
+			const val = Number(args[++i]);
+			options.neighbors = Number.isNaN(val) ? 15 : val;
 		} else if (arg === "--min-dist") {
-			options.minDist = Number(args[++i]);
+			const val = Number(args[++i]);
+			options.minDist = Number.isNaN(val) ? 0.1 : val;
+		} else if (arg === "--spread") {
+			const val = Number(args[++i]);
+			options.spread = Number.isNaN(val) ? 1.0 : val;
+		} else if (arg === "--force") {
+			options.force = true;
 		} else if (arg === "--search") {
 			options.search = true;
+		} else if (arg === "--local-model") {
+			options.localModel = args[++i];
+		} else if (arg === "--pca-dims") {
+			const val = Number(args[++i]);
+			options.pcaDims = Number.isNaN(val) ? undefined : val;
 		} else if (arg === "--help" || arg === "-h") {
 			console.log(`
 doppelgangers - Find duplicate PRs through embedding visualization
@@ -195,10 +282,14 @@ Options:
   --body-chars <n>          Max chars for body snippet (default: 2000)
   --neighbors <n>           UMAP neighbors (default: 15)
   --min-dist <n>            UMAP min distance (default: 0.1)
+  --spread <n>              UMAP spread (default: 1.0)
+  --force                   Force re-calculation of projections
   --search                  Include embeddings for semantic search (increases file size)
+  --local-model <path>      Path to local GGUF model for embeddings (optional)
+  --pca-dims <n>            Number of PCA dimensions to keep (skip interactive prompt)
 
 Environment:
-  OPENAI_API_KEY            Required for embedding generation
+  OPENAI_API_KEY            Required for embedding generation (unless --local-model is used)
 `);
 			process.exit(0);
 		}
@@ -231,6 +322,7 @@ Environment:
 		maxChars: options.maxChars,
 		bodyChars: options.bodyChars,
 		resume: false,
+		localModel: options.localModel,
 	};
 	await embed(embedOptions);
 
@@ -243,9 +335,12 @@ Environment:
 		projections: projectionsPath,
 		neighbors: options.neighbors,
 		minDist: options.minDist,
+		spread: options.spread,
+		force: options.force,
 		includeEmbeddings: options.search,
+		pcaDims: options.pcaDims,
 	};
-	build(buildOptions);
+	await build(buildOptions);
 
 	console.log(`Done. Open ${path.resolve(options.html)}`);
 }

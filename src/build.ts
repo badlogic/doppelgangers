@@ -1,6 +1,9 @@
 import fs from "fs";
+import { PCA } from "ml-pca";
 import path from "path";
+import readline from "readline";
 import { UMAP } from "umap-js";
+import type { EmbeddingRecord } from "./embed.js";
 
 export interface BuildOptions {
 	input: string;
@@ -8,17 +11,10 @@ export interface BuildOptions {
 	projections: string;
 	neighbors: number;
 	minDist: number;
+	spread: number;
 	includeEmbeddings: boolean;
-}
-
-interface EmbeddingEntry {
-	url: string;
-	number?: number;
-	title: string;
-	body: string;
-	state?: string;
-	type?: string;
-	embedding: number[];
+	force: boolean;
+	pcaDims?: number;
 }
 
 interface Point {
@@ -33,15 +29,16 @@ interface Point {
 	body: string;
 	state?: string;
 	type?: string;
+	files?: string[];
 	embedding?: number[];
 }
 
-export function build(options: BuildOptions): void {
+export async function build(options: BuildOptions): Promise<void> {
 	const inputPath = path.resolve(options.input);
 	const outputPath = path.resolve(options.output);
 
 	const lines = fs.readFileSync(inputPath, "utf8").split("\n").filter(Boolean);
-	const entries: EmbeddingEntry[] = [];
+	const entries: EmbeddingRecord[] = [];
 	for (const line of lines) {
 		try {
 			entries.push(JSON.parse(line));
@@ -56,29 +53,94 @@ export function build(options: BuildOptions): void {
 	let coords2d: number[][];
 	let coords3d: number[][];
 
-	if (fs.existsSync(projectionsPath)) {
+	if (!options.force && fs.existsSync(projectionsPath)) {
 		console.log(`Loading cached projections from ${projectionsPath}`);
 		const cached = JSON.parse(fs.readFileSync(projectionsPath, "utf8"));
 		coords2d = cached.coords2d;
 		coords3d = cached.coords3d;
 	} else {
+		console.log(`Running PCA on ${embeddings.length} embeddings...`);
+		const pca = new PCA(embeddings);
+		const explained = pca.getExplainedVariance();
+
+		// Show variance explained plot
+		console.log("\nVariance explained by top components:");
+		const width = 60;
+		for (let i = 0; i < Math.min(20, explained.length); i++) {
+			const val = explained[i];
+			const barLen = Math.floor(val * width * 10); // scale up for visibility since variances are small
+			const bar = "█".repeat(barLen);
+			console.log(`PC${(i + 1).toString().padStart(2)}: ${val.toFixed(4)} ${bar}`);
+		}
+
+		// Calculate cumulative variance for a few thresholds
+		let cumulative = 0;
+		const thresholds = [0.5, 0.75, 0.9, 0.95, 0.99];
+		const dimsNeeded = new Map<number, number>();
+
+		for (let i = 0; i < explained.length; i++) {
+			cumulative += explained[i];
+			for (const t of thresholds) {
+				if (cumulative >= t && !dimsNeeded.has(t)) {
+					dimsNeeded.set(t, i + 1);
+				}
+			}
+		}
+
+		console.log("\nDimensions needed for cumulative variance:");
+		for (const t of thresholds) {
+			if (dimsNeeded.has(t)) {
+				console.log(`${(t * 100).toFixed(0)}%: ${dimsNeeded.get(t)} dimensions`);
+			}
+		}
+
+		let dimToKeep = 50;
+
+		// Check if we should prompt
+		if (options.pcaDims) {
+			dimToKeep = options.pcaDims;
+			console.log(`Using provided PCA dimensions: ${dimToKeep}`);
+		} else if (process.stdout.isTTY) {
+			const rl = readline.createInterface({
+				input: process.stdin,
+				output: process.stdout,
+			});
+
+			const askQuestion = (query: string): Promise<string> => {
+				return new Promise((resolve) => rl.question(query, resolve));
+			};
+
+			const answer = await askQuestion("\nEnter number of dimensions to keep (default: 50): ");
+			rl.close();
+			dimToKeep = answer.trim() ? parseInt(answer.trim(), 10) : 50;
+		} else {
+			console.log(`Non-interactive environment detected, using default PCA dimensions: ${dimToKeep}`);
+		}
+
+		console.log(`Reducing to ${dimToKeep} dimensions...`);
+
+		const reducedMatrix = pca.predict(embeddings, { nComponents: dimToKeep });
+		const reducedEmbeddings = reducedMatrix.to2DArray();
+
 		const umap2d = new UMAP({
 			nComponents: 2,
 			nNeighbors: options.neighbors,
 			minDist: options.minDist,
+			spread: options.spread,
 			random: Math.random,
 		});
 		const umap3d = new UMAP({
 			nComponents: 3,
 			nNeighbors: options.neighbors,
 			minDist: options.minDist,
+			spread: options.spread,
 			random: Math.random,
 		});
 
-		console.log(`Running UMAP 2D on ${embeddings.length} embeddings`);
-		coords2d = umap2d.fit(embeddings);
-		console.log(`Running UMAP 3D on ${embeddings.length} embeddings`);
-		coords3d = umap3d.fit(embeddings);
+		console.log(`Running UMAP 2D on ${reducedEmbeddings.length} embeddings (${dimToKeep} dims after PCA)`);
+		coords2d = umap2d.fit(reducedEmbeddings);
+		console.log(`Running UMAP 3D on ${reducedEmbeddings.length} embeddings (${dimToKeep} dims after PCA)`);
+		coords3d = umap3d.fit(reducedEmbeddings);
 
 		fs.writeFileSync(projectionsPath, JSON.stringify({ coords2d, coords3d }));
 		console.log(`Saved projections to ${projectionsPath}`);
@@ -121,6 +183,7 @@ export function build(options: BuildOptions): void {
 			body: entry.body || "",
 			state: entry.state,
 			type: entry.type,
+			files: entry.files,
 			embedding: options.includeEmbeddings ? entry.embedding : undefined,
 		};
 	});
@@ -971,7 +1034,10 @@ if (process.argv[1]?.endsWith("build.js") || process.argv[1]?.endsWith("build.ts
 		projections: "projections.json",
 		neighbors: 15,
 		minDist: 0.1,
+		spread: 1.0,
 		includeEmbeddings: false,
+		force: false,
+		pcaDims: undefined,
 	};
 
 	for (let i = 0; i < args.length; i += 1) {
@@ -986,6 +1052,13 @@ if (process.argv[1]?.endsWith("build.js") || process.argv[1]?.endsWith("build.ts
 			options.neighbors = Number(args[++i]);
 		} else if (arg === "--min-dist") {
 			options.minDist = Number(args[++i]);
+		} else if (arg === "--spread") {
+			options.spread = Number(args[++i]);
+		} else if (arg === "--force") {
+			options.force = true;
+		} else if (arg === "--pca-dims") {
+			const val = Number(args[++i]);
+			options.pcaDims = Number.isNaN(val) ? undefined : val;
 		} else if (arg === "--search") {
 			options.includeEmbeddings = true;
 		}
