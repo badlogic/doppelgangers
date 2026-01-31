@@ -1,8 +1,12 @@
 # Doppelgangers
 
+Sloppy tools for sloppy times.
+
 https://github.com/user-attachments/assets/60212797-8caa-4a8c-aa6b-a39cf86bed99
 
-Find duplicate issues and PRs through embedding visualization. Fetches issues/PRs from a GitHub repo, generates embeddings, and renders an interactive 2D/3D scatter plot where similar items cluster together.
+Explore all the slop issues and PRs of your GitHub repos visually. Triage them manually or give clusters to your clanker to clean things up.
+
+Fetches issues/PRs, generates embeddings, projects them to 2D/3D via UMAP. Similar items cluster together. Select a cluster, open all, close the dupes.
 
 **Demos:** [openai/codex](https://mariozechner.at/uploads/codex.html) | [sst/opencode](https://mariozechner.at/uploads/opencode.html) | [openclaw/openclaw](https://mariozechner.at/uploads/openclaw.html)
 
