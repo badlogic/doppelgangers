@@ -1,5 +1,7 @@
 # Doppelgangers
 
+https://github.com/user-attachments/assets/60212797-8caa-4a8c-aa6b-a39cf86bed99
+
 Find duplicate issues and PRs through embedding visualization. Fetches issues/PRs from a GitHub repo, generates embeddings, and renders an interactive 2D/3D scatter plot where similar items cluster together.
 
 **Demos:** [openai/codex](https://mariozechner.at/uploads/codex.html) | [sst/opencode](https://mariozechner.at/uploads/opencode.html) | [openclaw/openclaw](https://mariozechner.at/uploads/openclaw.html)
