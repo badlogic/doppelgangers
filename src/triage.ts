@@ -54,6 +54,7 @@ async function fetchItems(
 ): Promise<FetchResult> {
 	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
+	const repoLabel = `${owner}/${name}`;
 	const items: object[] = [];
 	let prCount = 0;
 	let issueCount = 0;
@@ -84,7 +85,7 @@ async function fetchItems(
 					else issueCount++;
 					const total = prCount + issueCount;
 					if (total % 200 === 0) {
-						console.log(`Fetched ${prCount} PRs, ${issueCount} issues`);
+						console.log(`[${repoLabel}] Fetched ${prCount} PRs, ${issueCount} issues`);
 					}
 				} catch {
 					// skip invalid JSON
@@ -233,9 +234,13 @@ Environment:
 	};
 	await embed(embedOptions);
 
+	const embeddingsPath = path.resolve(options.embeddings);
+	const projectionsPath = embeddingsPath.replace(/\.[^.]+$/, "-projections.json");
+
 	const buildOptions: BuildOptions = {
-		input: path.resolve(options.embeddings),
+		input: embeddingsPath,
 		output: path.resolve(options.html),
+		projections: projectionsPath,
 		neighbors: options.neighbors,
 		minDist: options.minDist,
 		includeEmbeddings: options.search,

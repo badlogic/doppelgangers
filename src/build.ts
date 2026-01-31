@@ -5,6 +5,7 @@ import { UMAP } from "umap-js";
 export interface BuildOptions {
 	input: string;
 	output: string;
+	projections: string;
 	neighbors: number;
 	minDist: number;
 	includeEmbeddings: boolean;
@@ -50,24 +51,38 @@ export function build(options: BuildOptions): void {
 	}
 
 	const embeddings = entries.map((entry) => entry.embedding);
+	const projectionsPath = path.resolve(options.projections);
 
-	const umap2d = new UMAP({
-		nComponents: 2,
-		nNeighbors: options.neighbors,
-		minDist: options.minDist,
-		random: Math.random,
-	});
-	const umap3d = new UMAP({
-		nComponents: 3,
-		nNeighbors: options.neighbors,
-		minDist: options.minDist,
-		random: Math.random,
-	});
+	let coords2d: number[][];
+	let coords3d: number[][];
 
-	console.log(`Running UMAP 2D on ${embeddings.length} embeddings`);
-	const coords2d = umap2d.fit(embeddings);
-	console.log(`Running UMAP 3D on ${embeddings.length} embeddings`);
-	const coords3d = umap3d.fit(embeddings);
+	if (fs.existsSync(projectionsPath)) {
+		console.log(`Loading cached projections from ${projectionsPath}`);
+		const cached = JSON.parse(fs.readFileSync(projectionsPath, "utf8"));
+		coords2d = cached.coords2d;
+		coords3d = cached.coords3d;
+	} else {
+		const umap2d = new UMAP({
+			nComponents: 2,
+			nNeighbors: options.neighbors,
+			minDist: options.minDist,
+			random: Math.random,
+		});
+		const umap3d = new UMAP({
+			nComponents: 3,
+			nNeighbors: options.neighbors,
+			minDist: options.minDist,
+			random: Math.random,
+		});
+
+		console.log(`Running UMAP 2D on ${embeddings.length} embeddings`);
+		coords2d = umap2d.fit(embeddings);
+		console.log(`Running UMAP 3D on ${embeddings.length} embeddings`);
+		coords3d = umap3d.fit(embeddings);
+
+		fs.writeFileSync(projectionsPath, JSON.stringify({ coords2d, coords3d }));
+		console.log(`Saved projections to ${projectionsPath}`);
+	}
 
 	const xs = coords2d.map((c) => c[0]);
 	const ys = coords2d.map((c) => c[1]);
@@ -374,8 +389,10 @@ function generateHtml(dataJson: string): string {
         border-radius: 50%;
         background: var(--muted);
       }
-      .legend-square {
-        background: var(--muted);
+      .legend-ring {
+        border: 2px solid var(--muted);
+        border-radius: 50%;
+        background: transparent;
       }
     </style>
   </head>
@@ -400,7 +417,7 @@ function generateHtml(dataJson: string): string {
           </div>
           <div class="legend">
             <span class="legend-item"><span class="legend-shape legend-circle"></span> PR</span>
-            <span class="legend-item"><span class="legend-shape legend-square"></span> Issue</span>
+            <span class="legend-item"><span class="legend-shape legend-ring"></span> Issue</span>
           </div>
           <div id="hud-instructions" style="margin-top: 8px;">
             <div id="hud-line-2d">2D: drag to pan, scroll to zoom</div>
@@ -502,6 +519,7 @@ function generateHtml(dataJson: string): string {
         selecting: false,
         dragMode: null,
         dragStart: { x: 0, y: 0 },
+        mouseDownPos: { x: 0, y: 0 },
         selectRect: null,
         selected: new Set(),
         addToSelection: false
@@ -552,10 +570,14 @@ function generateHtml(dataJson: string): string {
         const z1 = -x * sinY + z * cosY;
         const y1 = y * cosX - z1 * sinX;
         const z2 = y * sinX + z1 * cosX;
+        // Cull points behind camera
+        if (z2 < -0.9) {
+          return { x: -1000, y: -1000, depth: z2, culled: true };
+        }
         const perspective = 1 / (1 + z2 * 0.9);
         const screenX = x1 * perspective * canvas.clientWidth * 0.7 + canvas.clientWidth * 0.5 + view3d.offsetX;
         const screenY = y1 * perspective * canvas.clientHeight * 0.7 + canvas.clientHeight * 0.5 + view3d.offsetY;
-        return { x: screenX, y: screenY, depth: z2 };
+        return { x: screenX, y: screenY, depth: z2, culled: false };
       };
 
       const getScreenPoint = (point) => {
@@ -652,8 +674,11 @@ function generateHtml(dataJson: string): string {
         });
       };
       
-      const drawSquare = (x, y, size) => {
-        ctx.fillRect(x - size, y - size, size * 2, size * 2);
+      const drawRing = (x, y, size) => {
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
       };
 
       const render = () => {
@@ -670,12 +695,14 @@ function generateHtml(dataJson: string): string {
           projected.sort((a, b) => a.screen.depth - b.screen.depth);
         }
         for (const item of projected) {
+          if (item.screen.culled) continue;
           const point = data[item.index];
           const isSelected = state.selected.has(item.index);
           const size = isSelected ? 4 : 2.5;
           ctx.fillStyle = getPointColor(point, isSelected);
           if (point.type === "issue") {
-            drawSquare(item.screen.x, item.screen.y, size);
+            ctx.strokeStyle = getPointColor(point, isSelected);
+            drawRing(item.screen.x, item.screen.y, size + 1);
           } else {
             ctx.beginPath();
             ctx.arc(item.screen.x, item.screen.y, size, 0, Math.PI * 2);
@@ -701,6 +728,7 @@ function generateHtml(dataJson: string): string {
         if (event.button !== 0) return;
         const point = getCanvasPoint(event);
         const ctrlOrMeta = event.ctrlKey || event.metaKey;
+        state.mouseDownPos = { x: point.x, y: point.y };
         
         if (event.shiftKey) {
           state.selecting = true;
@@ -770,9 +798,8 @@ function generateHtml(dataJson: string): string {
 
       const endDrag = (event) => {
         const point = getCanvasPoint(event);
-        const wasDragging = state.dragging;
         const wasSelecting = state.selecting;
-        const dragDist = Math.hypot(point.x - state.dragStart.x, point.y - state.dragStart.y);
+        const totalDist = Math.hypot(point.x - state.mouseDownPos.x, point.y - state.mouseDownPos.y);
         
         if (state.dragging) {
           state.dragging = false;
@@ -787,17 +814,11 @@ function generateHtml(dataJson: string): string {
           scheduleRender();
         }
         
-        // Only deselect if click was on the canvas
+        // Only deselect on actual click (no movement), not after drag
         if (event.target !== canvas) return;
+        if (wasSelecting) return;
         
-        if (!wasDragging && !wasSelecting) {
-          const hitIndex = hitTestPoint(point.x, point.y, 8);
-          if (hitIndex === -1) {
-            state.selected.clear();
-            updateSidebar();
-            scheduleRender();
-          }
-        } else if (wasDragging && dragDist < 3) {
+        if (totalDist < 3) {
           const hitIndex = hitTestPoint(point.x, point.y, 8);
           if (hitIndex === -1) {
             state.selected.clear();
@@ -918,14 +939,14 @@ function generateHtml(dataJson: string): string {
       canvas.addEventListener("wheel", (event) => {
         event.preventDefault();
         const point = getCanvasPoint(event);
-        const zoom = Math.exp(-event.deltaY * 0.001);
+        const zoomFactor = Math.exp(-event.deltaY * 0.001);
         if (state.mode === "3d") {
-          view3d.zoom = clamp(view3d.zoom * zoom, 0.4, 3.5);
+          view3d.zoom = clamp(view3d.zoom * zoomFactor, 0.4, 5);
           scheduleRender();
           return;
         }
         const prevScale = view2d.scale;
-        view2d.scale = clamp(view2d.scale * zoom, 0.2, 12);
+        view2d.scale = clamp(view2d.scale * zoomFactor, 0.2, 12);
         const scaleChange = view2d.scale / prevScale;
         view2d.offsetX = point.x - (point.x - view2d.offsetX) * scaleChange;
         view2d.offsetY = point.y - (point.y - view2d.offsetY) * scaleChange;
@@ -947,6 +968,7 @@ if (process.argv[1]?.endsWith("build.js") || process.argv[1]?.endsWith("build.ts
 	const options: BuildOptions = {
 		input: "embeddings.jsonl",
 		output: "triage.html",
+		projections: "projections.json",
 		neighbors: 15,
 		minDist: 0.1,
 		includeEmbeddings: false,
@@ -958,6 +980,8 @@ if (process.argv[1]?.endsWith("build.js") || process.argv[1]?.endsWith("build.ts
 			options.input = args[++i];
 		} else if (arg === "--output") {
 			options.output = args[++i];
+		} else if (arg === "--projections") {
+			options.projections = args[++i];
 		} else if (arg === "--neighbors") {
 			options.neighbors = Number(args[++i]);
 		} else if (arg === "--min-dist") {
