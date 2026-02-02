@@ -27,7 +27,6 @@ interface TriageOptions {
 	force: boolean;
 	search: boolean;
 	localModel?: string;
-	pcaDims?: number;
 }
 
 function parseRepo(repo: string): { owner: string; name: string } | null {
@@ -209,7 +208,6 @@ async function main() {
 		spread: 1.0,
 		force: false,
 		search: false,
-		pcaDims: undefined,
 	};
 
 	for (let i = 0; i < args.length; i += 1) {
@@ -259,9 +257,6 @@ async function main() {
 			options.search = true;
 		} else if (arg === "--local-model") {
 			options.localModel = args[++i];
-		} else if (arg === "--pca-dims") {
-			const val = Number(args[++i]);
-			options.pcaDims = Number.isNaN(val) ? undefined : val;
 		} else if (arg === "--help" || arg === "-h") {
 			console.log(`
 doppelgangers - Find duplicate PRs through embedding visualization
@@ -286,7 +281,6 @@ Options:
   --force                   Force re-calculation of projections
   --search                  Include embeddings for semantic search (increases file size)
   --local-model <path>      Path to local GGUF model for embeddings (optional)
-  --pca-dims <n>            Number of PCA dimensions to keep (skip interactive prompt)
 
 Environment:
   OPENAI_API_KEY            Required for embedding generation (unless --local-model is used)
@@ -338,7 +332,6 @@ Environment:
 		spread: options.spread,
 		force: options.force,
 		includeEmbeddings: options.search,
-		pcaDims: options.pcaDims,
 	};
 	await build(buildOptions);
 

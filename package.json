@@ -27,7 +27,6 @@
 		"url": "https://github.com/badlogic/doppelgangers.git"
 	},
 	"dependencies": {
-		"ml-pca": "^4.1.1",
 		"openai": "^4.104.0",
 		"umap-js": "^1.4.0"
 	},
