@@ -36,6 +36,7 @@ This will:
 | `--repo <url\|owner/repo>` | GitHub repository (required) | |
 | `--state <state>` | `open`, `closed`, or `all` | `open` |
 | `--type <type>` | `pr`, `issue`, or `all` | `all` |
+| `--since <value>` | Created-date cutoff: `YYYY-MM-DD` or `<days>d` (e.g. `14d`) | |
 | `--output <path>` | Items JSON path | `prs.json` |
 | `--embeddings <path>` | Embeddings path | `embeddings.jsonl` |
 | `--html <path>` | HTML viewer path | `triage.html` |
@@ -46,6 +47,16 @@ This will:
 | `--neighbors <n>` | UMAP neighbors | `15` |
 | `--min-dist <n>` | UMAP min distance | `0.1` |
 | `--search` | Include embeddings for semantic search | `false` |
+
+Date filtering examples:
+
+```bash
+# from a specific day onward (inclusive)
+doppelgangers --repo facebook/react --since 2026-02-01
+
+# last 14 days (local time, starting at local midnight)
+doppelgangers --repo facebook/react --since 14d
+```
 
 ## Viewer
 

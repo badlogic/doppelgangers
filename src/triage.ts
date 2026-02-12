@@ -14,6 +14,7 @@ interface TriageOptions {
 	repo: string | null;
 	state: ItemState;
 	type: ItemType;
+	since?: string;
 	output: string;
 	embeddings: string;
 	html: string;
@@ -27,6 +28,55 @@ interface TriageOptions {
 	force: boolean;
 	search: boolean;
 	localModel?: string;
+}
+
+interface SinceFilter {
+	raw: string;
+	cutoff: Date;
+	cutoffYmd: string;
+}
+
+function formatLocalYmd(date: Date): string {
+	const y = date.getFullYear();
+	const m = String(date.getMonth() + 1).padStart(2, "0");
+	const d = String(date.getDate()).padStart(2, "0");
+	return `${y}-${m}-${d}`;
+}
+
+function parseSinceValue(value: string): SinceFilter {
+	const relativeMatch = value.match(/^(\d+)d$/i);
+	if (relativeMatch) {
+		const days = Number(relativeMatch[1]);
+		if (!Number.isInteger(days) || days < 1) {
+			throw new Error("--since relative format must be a positive day count like 14d");
+		}
+		const cutoff = new Date();
+		cutoff.setHours(0, 0, 0, 0);
+		cutoff.setDate(cutoff.getDate() - days);
+		return {
+			raw: value,
+			cutoff,
+			cutoffYmd: formatLocalYmd(cutoff),
+		};
+	}
+
+	const absoluteMatch = value.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+	if (absoluteMatch) {
+		const year = Number(absoluteMatch[1]);
+		const month = Number(absoluteMatch[2]);
+		const day = Number(absoluteMatch[3]);
+		const cutoff = new Date(year, month - 1, day, 0, 0, 0, 0);
+		if (cutoff.getFullYear() !== year || cutoff.getMonth() !== month - 1 || cutoff.getDate() !== day) {
+			throw new Error(`Invalid --since date: ${value}. Use YYYY-MM-DD.`);
+		}
+		return {
+			raw: value,
+			cutoff,
+			cutoffYmd: formatLocalYmd(cutoff),
+		};
+	}
+
+	throw new Error("Invalid --since value. Use YYYY-MM-DD or <days>d (e.g., 14d, 30d)");
 }
 
 function parseRepo(repo: string): { owner: string; name: string } | null {
@@ -54,6 +104,7 @@ async function fetchItems(
 	state: ItemState,
 	type: ItemType,
 	outputPath: string,
+	sinceFilter?: SinceFilter,
 ): Promise<FetchResult> {
 	fs.mkdirSync(path.dirname(outputPath), { recursive: true });
 
@@ -95,6 +146,54 @@ async function fetchItems(
 		});
 
 		await Promise.all([readPromise, exitPromise]);
+	};
+
+	const fetchWithSinceSearch = async (itemType: "pr" | "issue") => {
+		if (!sinceFilter) return;
+
+		const statesToFetch: Array<"open" | "closed"> = state === "all" ? ["open", "closed"] : [state];
+
+		for (const stateValue of statesToFetch) {
+			const jsonFields =
+				itemType === "pr" ? "number,title,body,url,state" : "number,title,body,url,state,isPullRequest";
+			const jqFilter =
+				itemType === "pr"
+					? '.[] | {url, number, title, body, state: (.state | ascii_downcase), type: "pr"}'
+					: '.[] | select(.isPullRequest == false) | {url, number, title, body, state: (.state | ascii_downcase), type: "issue"}';
+
+			const args = [
+				"search",
+				itemType === "pr" ? "prs" : "issues",
+				"--repo",
+				repoLabel,
+				"--state",
+				stateValue,
+				"--created",
+				`>=${sinceFilter.cutoffYmd}`,
+				"--sort",
+				"created",
+				"--order",
+				"desc",
+				"--limit",
+				"1000",
+				"--json",
+				jsonFields,
+				"--jq",
+				jqFilter,
+			];
+
+			await streamGhJson(args, (item) => {
+				items.push(item);
+				if (itemType === "pr") prCount++;
+				else issueCount++;
+				const total = prCount + issueCount;
+				if (total % 200 === 0) {
+					console.log(`[${repoLabel}] Fetched ${prCount} PRs, ${issueCount} issues`);
+				}
+			});
+		}
+
+		console.log(`[${repoLabel}] Fetched ${prCount} PRs, ${issueCount} issues`);
 	};
 
 	// Helper for GraphQL pagination of PRs
@@ -177,12 +276,20 @@ async function fetchItems(
 	};
 
 	if (type === "pr" || type === "all") {
-		await fetchPrsGraphql();
+		if (sinceFilter) {
+			await fetchWithSinceSearch("pr");
+		} else {
+			await fetchPrsGraphql();
+		}
 	}
 
 	if (type === "issue" || type === "all") {
-		const issueEndpoint = `/repos/${owner}/${name}/issues?state=${state}&per_page=100`;
-		await fetchEndpoint(issueEndpoint, "issue");
+		if (sinceFilter) {
+			await fetchWithSinceSearch("issue");
+		} else {
+			const issueEndpoint = `/repos/${owner}/${name}/issues?state=${state}&per_page=100`;
+			await fetchEndpoint(issueEndpoint, "issue");
+		}
 	}
 
 	fs.writeFileSync(outputPath, JSON.stringify(items, null, 2));
@@ -196,6 +303,7 @@ async function main() {
 		repo: null,
 		state: "open",
 		type: "all",
+		since: undefined,
 		output: "prs.json",
 		embeddings: "embeddings.jsonl",
 		html: "triage.html",
@@ -228,6 +336,17 @@ async function main() {
 				process.exit(1);
 			}
 			options.type = val;
+		} else if (arg === "--since") {
+			if (options.since !== undefined) {
+				console.error("--since can only be provided once");
+				process.exit(1);
+			}
+			const val = args[++i];
+			if (!val) {
+				console.error("--since requires a value (YYYY-MM-DD or <days>d, e.g. 14d)");
+				process.exit(1);
+			}
+			options.since = val;
 		} else if (arg === "--output") {
 			options.output = args[++i];
 		} else if (arg === "--embeddings") {
@@ -268,6 +387,7 @@ Options:
   --repo <url|owner/repo>   GitHub repository (required)
   --state <state>           Item state: open, closed, or all (default: open)
   --type <type>             Item type: pr, issue, or all (default: all)
+  --since <value>           Created-date cutoff (YYYY-MM-DD or <days>d, e.g. 14d)
   --output <path>           Output path for items JSON (default: prs.json)
   --embeddings <path>       Output path for embeddings (default: embeddings.jsonl)
   --html <path>             Output path for HTML viewer (default: triage.html)
@@ -300,12 +420,25 @@ Environment:
 		process.exit(1);
 	}
 
+	let sinceFilter: SinceFilter | undefined;
+	if (options.since) {
+		try {
+			sinceFilter = parseSinceValue(options.since);
+		} catch (error) {
+			console.error((error as Error).message);
+			process.exit(1);
+		}
+	}
+
 	const { owner, name } = repoInfo;
 	const typeLabel = options.type === "all" ? "PRs and issues" : options.type === "pr" ? "PRs" : "issues";
 	console.log(`Fetching ${options.state} ${typeLabel} for ${owner}/${name}`);
+	if (sinceFilter) {
+		console.log(`Filtering by created date since ${sinceFilter.cutoffYmd} (from --since ${sinceFilter.raw})`);
+	}
 
 	const outputPath = path.resolve(options.output);
-	const result = await fetchItems(owner, name, options.state, options.type, outputPath);
+	const result = await fetchItems(owner, name, options.state, options.type, outputPath, sinceFilter);
 	console.log(`Wrote ${outputPath} (${result.prs} PRs, ${result.issues} issues)`);
 
 	const embedOptions: EmbedOptions = {
